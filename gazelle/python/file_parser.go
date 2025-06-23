@@ -47,14 +47,22 @@ type ParserOutput struct {
 }
 
 type FileParser struct {
-	code                 []byte
-	relFilepath          string
-	output               ParserOutput
-	inTypeCheckingBlock  bool
+	code                []byte
+	relFilepath         string
+	output              ParserOutput
+	inTypeCheckingBlock bool
+
+	// typingAliases contains identifiers that refer to the "typing" module (e.g. an alias imported via `import typing as foo`).
+	typingAliases map[string]struct{}
+	// typeCheckingAliases contains identifiers that evaluate to the constant `typing.TYPE_CHECKING` (e.g. an alias imported via `from typing import TYPE_CHECKING as bar`).
+	typeCheckingAliases map[string]struct{}
 }
 
 func NewFileParser() *FileParser {
-	return &FileParser{}
+	return &FileParser{
+		typingAliases:       map[string]struct{}{"typing": {}},
+		typeCheckingAliases: map[string]struct{}{"TYPE_CHECKING": {}},
+	}
 }
 
 // ParseCode instantiates a new tree-sitter Parser and parses the python code, returning
@@ -154,7 +162,21 @@ func parseImportStatement(node *sitter.Node, code []byte) (Module, bool) {
 func (p *FileParser) parseImportStatements(node *sitter.Node) bool {
 	if node.Type() == sitterNodeTypeImportStatement {
 		for j := 1; j < int(node.ChildCount()); j++ {
-			m, ok := parseImportStatement(node.Child(j), p.code)
+			child := node.Child(j)
+
+			// Detect `import typing as foo` style aliases so we can recognise `foo.TYPE_CHECKING` later.
+			if child.Type() == sitterNodeTypeAliasedImport && child.ChildCount() >= 3 {
+				original := child.Child(0)
+				aliasNode := child.Child(2)
+				if original != nil && aliasNode != nil {
+					if original.Content(p.code) == "typing" {
+						p.typingAliases[aliasNode.Content(p.code)] = struct{}{}
+					}
+				}
+			}
+
+			// Continue with normal import parsing.
+			m, ok := parseImportStatement(child, p.code)
 			if !ok {
 				continue
 			}
@@ -171,7 +193,19 @@ func (p *FileParser) parseImportStatements(node *sitter.Node) bool {
 			return true
 		}
 		for j := 3; j < int(node.ChildCount()); j++ {
-			m, ok := parseImportStatement(node.Child(j), p.code)
+			child := node.Child(j)
+
+			// Detect `from typing import TYPE_CHECKING as bar` style aliases so we can recognise `bar` later.
+			if from == "typing" && child.Type() == sitterNodeTypeAliasedImport && child.ChildCount() >= 3 {
+				imported := child.Child(0)
+				aliasNode := child.Child(2)
+				if imported != nil && aliasNode != nil && imported.Content(p.code) == "TYPE_CHECKING" {
+					p.typeCheckingAliases[aliasNode.Content(p.code)] = struct{}{}
+				}
+			}
+
+			// Continue with normal import parsing.
+			m, ok := parseImportStatement(child, p.code)
 			if !ok {
 				continue
 			}
@@ -211,18 +245,23 @@ func (p *FileParser) isTypeCheckingBlock(node *sitter.Node) bool {
 
 	condition := node.Child(1)
 
-	// Handle `if TYPE_CHECKING:`
-	if condition.Type() == sitterNodeTypeIdentifier && condition.Content(p.code) == "TYPE_CHECKING" {
-		return true
+	// Case 1: Identifier directly (e.g. `if TYPE_CHECKING:` or aliased constant `if bar:`)
+	if condition.Type() == sitterNodeTypeIdentifier {
+		if _, ok := p.typeCheckingAliases[condition.Content(p.code)]; ok {
+			return true
+		}
 	}
 
-	// Handle `if typing.TYPE_CHECKING:`
+	// Case 2: Attribute access (e.g. `if typing.TYPE_CHECKING:` or `foo.TYPE_CHECKING:` where foo is alias for typing)
 	if condition.Type() == "attribute" && condition.ChildCount() >= 3 {
 		object := condition.Child(0)
 		attr := condition.Child(2)
-		if object.Type() == sitterNodeTypeIdentifier && object.Content(p.code) == "typing" &&
-			attr.Type() == sitterNodeTypeIdentifier && attr.Content(p.code) == "TYPE_CHECKING" {
-			return true
+		if attr.Type() == sitterNodeTypeIdentifier && attr.Content(p.code) == "TYPE_CHECKING" {
+			if object.Type() == sitterNodeTypeIdentifier {
+				if _, ok := p.typingAliases[object.Content(p.code)]; ok {
+					return true
+				}
+			}
 		}
 	}
 

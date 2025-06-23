@@ -291,3 +291,60 @@ def example_function():
 		}
 	}
 }
+
+func TestTypeCheckingImportsAliases(t *testing.T) {
+	units := []struct {
+		name            string
+		code            string
+		expectedModules map[string]bool // module name -> expected TypeCheckingOnly flag
+	}{
+		{
+			name: "typing module aliased usage",
+			code: `
+import typing as foo
+
+if foo.TYPE_CHECKING:
+    import boto3
+`,
+			expectedModules: map[string]bool{
+				"typing": false,
+				"boto3":  true,
+			},
+		},
+		{
+			name: "TYPE_CHECKING constant aliased usage",
+			code: `
+from typing import TYPE_CHECKING as bar
+
+if bar:
+    import boto3
+    from rest_framework import serializers
+`,
+			expectedModules: map[string]bool{
+				"typing.TYPE_CHECKING": false,
+				"boto3":               true,
+				"rest_framework.serializers": true,
+			},
+		},
+	}
+
+	for _, u := range units {
+		t.Run(u.name, func(t *testing.T) {
+			p := NewFileParser()
+			p.SetCodeAndFile([]byte(u.code), "", "test_alias.py")
+
+			result, err := p.Parse(context.Background())
+			if err != nil {
+				t.Fatalf("Failed to parse: %v", err)
+			}
+
+			for _, mod := range result.Modules {
+				if expected, exists := u.expectedModules[mod.Name]; exists {
+					if mod.TypeCheckingOnly != expected {
+						t.Errorf("Module %s: expected TypeCheckingOnly=%v, got %v", mod.Name, expected, mod.TypeCheckingOnly)
+					}
+				}
+			}
+		})
+	}
+}
