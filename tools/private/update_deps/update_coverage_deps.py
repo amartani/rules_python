@@ -130,7 +130,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument(
         "--name",
-        default="coverage",
+        default="covers",
         type=str,
         help="The name of the package",
     )

@@ -304,76 +304,35 @@ def _maybe_collect_coverage(enable):
 
     instrumented_files = [abs_path for abs_path, _ in instrumented_file_paths()]
     unique_dirs = {os.path.dirname(file) for file in instrumented_files}
-    source = "\n\t".join(unique_dirs)
 
     print_verbose_coverage("Instrumented Files:\n" + "\n".join(instrumented_files))
     print_verbose_coverage("Sources:\n" + "\n".join(unique_dirs))
 
-    import uuid
-
-    import coverage
+    import covers
 
     coverage_dir = os.environ["COVERAGE_DIR"]
-    unique_id = uuid.uuid4()
 
-    # We need for coveragepy to use relative paths.  This can only be configured
-    # using an rc file.
-    rcfile_name = os.path.join(coverage_dir, ".coveragerc_{}".format(unique_id))
-    print_verbose_coverage("coveragerc file:", rcfile_name)
-    with open(rcfile_name, "w") as rcfile:
-        rcfile.write(
-            f"""[run]
-relative_files = True
-source =
-\t{source}
-"""
-        )
+    # Create covers instance with branch tracking
+    cov = covers.Covers(branch=True)
+    cov.start()
     try:
-        cov = coverage.Coverage(
-            config_file=rcfile_name,
-            branch=True,
-            # NOTE: The messages arg controls what coverage prints to stdout/stderr,
-            # which can interfere with the Bazel coverage command. Enabling message
-            # output is only useful for debugging coverage support.
-            messages=is_verbose_coverage(),
-            omit=[
-                # Pipes can't be read back later, which can cause coverage to
-                # throw an error when trying to get its source code.
-                "/dev/fd/*",
-                # The mechanism for finding third-party packages in coverage-py
-                # only works for installed packages, not for runfiles. e.g:
-                #'$HOME/.local/lib/python3.10/site-packages',
-                # '/usr/lib/python',
-                # '/usr/lib/python3.10/site-packages',
-                # '/usr/local/lib/python3.10/dist-packages'
-                # see https://github.com/nedbat/coveragepy/blob/bfb0c708fdd8182b2a9f0fc403596693ef65e475/coverage/inorout.py#L153-L164
-                "*/external/*",
-            ],
-        )
-        cov.start()
+        yield
+    finally:
+        cov.stop()
+        coverage_data = cov.get_coverage()
+        lcov_path = os.path.join(coverage_dir, "pylcov.dat")
+        print_verbose_coverage("generating lcov to:", lcov_path)
         try:
-            yield
-        finally:
-            cov.stop()
-            lcov_path = os.path.join(coverage_dir, "pylcov.dat")
-            print_verbose_coverage("generating lcov from:", lcov_path)
-            cov.lcov_report(
-                outfile=lcov_path,
-                # Ignore errors because sometimes instrumented files aren't
-                # readable afterwards. e.g. if they come from /dev/fd or if
-                # they were transient code-under-test in /tmp
-                ignore_errors=True,
-            )
+            with open(lcov_path, "w") as f:
+                covers.print_lcov(coverage_data, file=f)
             if os.path.isfile(lcov_path):
                 unresolve_symlinks(lcov_path)
-    finally:
-        try:
-            os.unlink(rcfile_name)
-        except OSError as err:
-            # It's possible that the profiled program might execute another Python
-            # binary through a wrapper that would then delete the rcfile.  Not much
-            # we can do about that, besides ignore the failure here.
-            print_verbose_coverage("Error removing temporary coverage rc file:", err)
+        except Exception as e:
+            # Ignore errors because sometimes instrumented files aren't
+            # readable afterwards. e.g. if they come from /dev/fd or if
+            # they were transient code-under-test in /tmp
+            if is_verbose_coverage():
+                print_verbose_coverage(f"Error generating lcov report: {e}")
 
 
 def _add_site_packages(site_packages):
